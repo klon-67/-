@@ -469,3 +469,319 @@ async def top_show(query, order="coins"):
     order = allowed.get(order, "coins")
 
     with connect() as db:
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            f"SELECT name, username, coins, wins, xp FROM players "
+            f"ORDER BY {order} DESC LIMIT 10"
+        ).fetchall()
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 РЕЙТИНГ ГРАВЦІВ\n"]
+
+    for i, p in enumerate(rows):
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        value = p[order]
+        label = {"coins": "монет", "wins": "перемог", "xp": "XP"}[order]
+        name = p["name"] or "Гравець"
+        lines.append(f"{medal} {name} — {value} {label}")
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🪙 Монети", callback_data="top_coins"),
+            InlineKeyboardButton("🏆 Перемоги", callback_data="top_wins"),
+            InlineKeyboardButton("⭐ Досвід", callback_data="top_xp")
+        ],
+        [InlineKeyboardButton("🏠 Меню", callback_data="menu")]
+    ])
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=keyboard
+    )
+
+
+# ==================== ЩОДЕННИЙ БОНУС ====================
+
+async def daily_show(query):
+    p = player(query.from_user)
+    today = date.today()
+    today_text = today.isoformat()
+
+    if p["daily_date"] == today_text:
+        await query.edit_message_text(
+            f"🎁 Ти вже отримав бонус сьогодні!\n\n"
+            f"🔥 Твоя серія: {p['streak']} днів.\n"
+            "Повертайся завтра!",
+            reply_markup=back()
+        )
+        return
+
+    yesterday = (today - timedelta(days=1)).isoformat()
+
+    streak = p["streak"] + 1 if p["daily_date"] == yesterday else 1
+    reward = 50 + min(streak - 1, 7) * 10
+
+    with connect() as db:
+        db.execute("""
+            UPDATE players
+            SET coins=coins+50+?,
+                xp=xp+5,
+                daily_date=?,
+                streak=?
+            WHERE id=?
+        """, (
+            min(streak - 1, 7) * 10,
+            today_text,
+            streak,
+            query.from_user.id
+        ))
+
+    await query.edit_message_text(
+        f"🎉 ЩОДЕННИЙ БОНУС!\n\n"
+        f"🪙 +{reward} монет\n"
+        f"⭐ +5 XP\n"
+        f"🔥 Серія: {streak} днів\n\n"
+        "Заходь завтра за наступною нагородою!",
+        reply_markup=back()
+    )
+
+
+# ==================== ДОСЯГНЕННЯ ====================
+
+async def achievements_show(query):
+    p = player(query.from_user)
+    achievements = []
+
+    if p["games"] >= 1:
+        achievements.append("🎮 Перша гра — зіграно хоча б одну гру")
+    if p["wins"] >= 5:
+        achievements.append("🏆 Боєць — 5 перемог")
+    if p["wins"] >= 20:
+        achievements.append("👑 Чемпіон — 20 перемог")
+    if p["coins"] >= 500:
+        achievements.append("🪙 Багатій — 500 монет")
+    if p["xp"] >= 100:
+        achievements.append("⭐ Досвідчений — 100 XP")
+    if p["quiz_correct"] >= 10:
+        achievements.append("🧠 Ерудит — 10 правильних відповідей")
+    if p["streak"] >= 7:
+        achievements.append("🔥 Постійний гравець — серія 7 днів")
+
+    text = "🏅 ТВОЇ ДОСЯГНЕННЯ\n\n"
+    text += "\n".join(achievements) if achievements else \
+        "Поки що досягнень немає. Грай і відкривай їх!"
+
+    await query.edit_message_text(text, reply_markup=back())
+
+
+# ==================== ОБРОБКА КНОПОК ====================
+
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    player(query.from_user)
+    data = query.data
+
+    if data == "menu":
+        context.user_data.pop("guess", None)
+        await query.edit_message_text(
+            "🎮 GAME MASTER\n\nОбирай гру або функцію!",
+            reply_markup=menu()
+        )
+
+    elif data == "guess":
+        await guess_start(query, context)
+
+    elif data.startswith("g_"):
+        difficulty = data[2:]
+        await guess_begin(query, context, difficulty)
+
+    elif data == "giveup":
+        game = context.user_data.pop("guess", None)
+        if game:
+            update_player(query.from_user.id, losses=1, games=1)
+            text = f"🏳️ Загадане число було {game['number']}."
+        else:
+            text = "Активної гри немає."
+        await query.edit_message_text(text, reply_markup=menu())
+
+    elif data == "rps":
+        await rps_start(query)
+
+    elif data.startswith("r_"):
+        await rps_play(query, data[2:])
+
+    elif data == "quiz":
+        await quiz_start(query, context)
+
+    elif data.startswith("q_"):
+        await quiz_answer(query, context, int(data[2:]))
+
+    elif data == "profile":
+        await profile_show(query)
+
+    elif data == "coins":
+        await coins_show(query)
+
+    elif data == "top":
+        await top_show(query)
+
+    elif data.startswith("top_"):
+        await top_show(query, data[4:])
+
+    elif data == "daily":
+        await daily_show(query)
+
+    elif data == "achievements":
+        await achievements_show(query)
+
+    elif data == "help":
+        await query.edit_message_text(
+            "❔ ДОПОМОГА\n\n"
+            "🎲 Вгадай число — відгадай число.\n"
+            "✊ КНП — грай проти бота.\n"
+            "🧠 Вікторина — відповідай на запитання.\n"
+            "🪙 Монетки — отримуй нагороди.\n"
+            "🏆 Рейтинг — змагайся з гравцями.\n"
+            "🎁 Щоденний бонус — забирай монети раз на день.\n"
+            "👤 Профіль — дивись статистику.",
+            reply_markup=back()
+        )
+
+
+# ==================== КОМАНДИ ====================
+
+async def guess_command(update, context):
+    player(update.effective_user)
+    await update.effective_message.reply_text(
+        "🎲 Обери складність у головному меню кнопкою «Вгадай число».",
+        reply_markup=menu()
+    )
+
+
+async def rps_command(update, context):
+    player(update.effective_user)
+    await update.effective_message.reply_text(
+        "Відкрий гру через головне меню.",
+        reply_markup=menu()
+    )
+
+
+async def quiz_command(update, context):
+    player(update.effective_user)
+    await update.effective_message.reply_text(
+        "Відкрий вікторину через головне меню.",
+        reply_markup=menu()
+    )
+
+
+async def profile_command(update, context):
+    p = player(update.effective_user)
+    await update.effective_message.reply_text(
+        f"👤 {p['name']}\n"
+        f"🪙 Монети: {p['coins']}\n"
+        f"⭐ Рівень: {p['xp'] // 100 + 1}\n"
+        f"✨ XP: {p['xp']}\n"
+        f"🎮 Ігор: {p['games']}\n"
+        f"🏆 Перемог: {p['wins']}\n"
+        f"💥 Поразок: {p['losses']}\n"
+        f"🧠 Правильних відповідей: {p['quiz_correct']}",
+        reply_markup=menu()
+    )
+
+
+async def top_command(update, context):
+    player(update.effective_user)
+    with connect() as db:
+        rows = db.execute(
+            "SELECT name, coins FROM players ORDER BY coins DESC LIMIT 10"
+        ).fetchall()
+
+    text = "🏆 ТОП-10 ГРАВЦІВ\n\n"
+    for i, (name, coins) in enumerate(rows, 1):
+        text += f"{i}. {name} — {coins} 🪙\n"
+
+    await update.effective_message.reply_text(text, reply_markup=menu())
+
+
+async def daily_command(update, context):
+    player(update.effective_user)
+    p = player(update.effective_user)
+    today = date.today()
+    today_text = today.isoformat()
+
+    if p["daily_date"] == today_text:
+        await update.effective_message.reply_text(
+            "🎁 Ти вже забрав бонус сьогодні!",
+            reply_markup=menu()
+        )
+        return
+
+    yesterday = (today - timedelta(days=1)).isoformat()
+    streak = p["streak"] + 1 if p["daily_date"] == yesterday else 1
+    reward = 50 + min(streak - 1, 7) * 10
+
+    with connect() as db:
+        db.execute("""
+            UPDATE players
+            SET coins=coins+?, xp=xp+5, daily_date=?, streak=?
+            WHERE id=?
+        """, (reward, today_text, streak, update.effective_user.id))
+
+    await update.effective_message.reply_text(
+        f"🎁 Бонус отримано!\n🪙 +{reward} монет\n⭐ +5 XP\n🔥 Серія: {streak}",
+        reply_markup=menu()
+    )
+
+
+async def coins_command(update, context):
+    p = player(update.effective_user)
+    await update.effective_message.reply_text(
+        f"🪙 У тебе {p['coins']} монет!",
+        reply_markup=menu()
+    )
+
+
+async def text_handler(update, context):
+    if await guess_message(update, context):
+        return
+
+    await update.effective_message.reply_text(
+        "Не зрозумів повідомлення. Обери кнопку в меню або напиши /start.",
+        reply_markup=menu()
+    )
+
+
+# ==================== ЗАПУСК БОТА ====================
+
+def main():
+    if TOKEN == "ВСТАВ_СЮДИ_СВІЙ_ТОКЕН":
+        raise SystemExit(
+            "Спочатку встав свій токен у змінну TOKEN на початку файлу!"
+        )
+
+    init_db()
+
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("guess", guess_command))
+    app.add_handler(CommandHandler("rps", rps_command))
+    app.add_handler(CommandHandler("quiz", quiz_command))
+    app.add_handler(CommandHandler("profile", profile_command))
+    app.add_handler(CommandHandler("top", top_command))
+    app.add_handler(CommandHandler("daily", daily_command))
+    app.add_handler(CommandHandler("coins", coins_command))
+
+    app.add_handler(CallbackQueryHandler(buttons))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
+    )
+
+    print("🎮 GameMaster запущено!")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
